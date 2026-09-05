@@ -1,0 +1,5 @@
+requests>=2.31
+pandas>=2.2
+numpy>=1.26
+lightgbm>=4.3
+scikit-learn>=1.4

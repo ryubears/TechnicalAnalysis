@@ -138,7 +138,7 @@ def pivot_table(
     Long table of pivots: one row per (swing, scale).
 
     ``df`` must be sorted by time with a DatetimeIndex (as returned by
-    :func:`src.api.binance.load_prices`). A swing that qualifies at several scales
+    `src.api.binance.load_prices`). A swing that qualifies at several scales
     appears once per scale, each with its own ``confirm_idx``.
 
     Columns: ``idx, time, kind, n, tier, price, confirm_idx, confirm_time, prominence``.
@@ -246,7 +246,7 @@ def pivot_summary(pivots: pd.DataFrame, n_bars: int) -> pd.DataFrame:
 # --------------------------------------------------------------------------------------
 
 def detect_pivots_bruteforce(high: np.ndarray, low: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """O(len * n) reference implementation of :func:`detect_pivots`."""
+    """O(len * n) reference implementation of `detect_pivots`."""
     high = np.asarray(high, dtype="float64")
     low = np.asarray(low, dtype="float64")
     L = len(high)

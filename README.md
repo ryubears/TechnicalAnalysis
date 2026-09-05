@@ -87,11 +87,13 @@ embargo of at least the prediction horizon** between train and test folds.
 │       ├── indicators.py        # ATR and other causal helpers
 │       ├── pivots.py            # N-bar pivot detection, stamped at confirmation
 │       ├── levels.py            # strategy 1: horizontal S/R levels and their features
-│       └── trendlines.py        # strategy 2: trendlines through same-kind pivots
+│       ├── trendlines.py        # strategy 2: trendlines through same-kind pivots
+│       └── fibonacci.py         # strategy 3: Fibonacci ratios on the active swing per tier
 ├── tests/
 │   ├── test_pivots.py
 │   ├── test_levels.py
-│   └── test_trendlines.py
+│   ├── test_trendlines.py
+│   └── test_fibonacci.py
 ├── requirements.txt
 └── README.md
 ```
@@ -188,6 +190,36 @@ Per-bar features, prefixed `tl_`, with distances in ATR and slopes in ATR per ba
 - `tl_n_sup`, `tl_n_res`, `tl_n_near`: alive lines on each side and within one ATR
 - `tl_break_dir`, `tl_break_mag_atr`, `tl_break_vol_ratio`, `tl_break_touches`,
   `tl_break_tier`, `tl_break_slope_atr`: set on bars where a close finished through a line
+
+## Fibonacci (strategy 3)
+
+```bash
+python -m src.features.fibonacci
+```
+
+`build_fibonacci_features(df, piv)` keeps one active swing per tier: from the latest
+confirmed tier-N pivot low to the latest confirmed tier-N pivot high, with whichever came
+later as the swing's end. A tier-N swing is redrawn whenever a new tier-N pivot confirms,
+so the minor swing changes every few bars while the major one persists for weeks. That is
+the obviousness axis: nobody draws fibs on every minor leg, everyone draws them on the
+major one.
+
+Ratio levels are measured as retracement from the swing end back toward its start, so 0
+is the end, 1 the start, 0.618 the golden retracement, and negative ratios are extensions
+beyond the end. The set is -0.618, -0.272, 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.272,
+1.618. Confirmed pivots of any tier landing within `touch_tol_atr` of a level after the
+swing's end count as touches; counters reset when the swing changes.
+
+Per-bar features for each tier, prefixed `fib_{N}_`:
+
+- `dir`, `retrace`, `range_atr`, `swing_bars`, `age_bars`: swing direction, the close in
+  retracement units, swing size in ATR, bars between the endpoints, bars since the end
+- `res_dist_atr`, `res_ratio`, `res_touches` / `sup_dist_atr`, `sup_ratio`, `sup_touches`:
+  nearest ratio level above / at-or-below the close, its ratio and touch count
+- `break_dir`, `break_ratio`, `break_mag_atr`, `break_vol_ratio`: set on bars where the
+  close crossed a ratio level since the previous close
+
+Across tiers, `fib_n_near` counts ratio levels within one ATR of the close.
 
 ## Tests
 

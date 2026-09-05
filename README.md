@@ -86,10 +86,12 @@ embargo of at least the prediction horizon** between train and test folds.
 │   └── features/
 │       ├── indicators.py        # ATR and other causal helpers
 │       ├── pivots.py            # N-bar pivot detection, stamped at confirmation
-│       └── levels.py            # strategy 1: horizontal S/R levels and their features
+│       ├── levels.py            # strategy 1: horizontal S/R levels and their features
+│       └── trendlines.py        # strategy 2: trendlines through same-kind pivots
 ├── tests/
 │   ├── test_pivots.py
-│   └── test_levels.py
+│   ├── test_levels.py
+│   └── test_trendlines.py
 ├── requirements.txt
 └── README.md
 ```
@@ -156,6 +158,36 @@ Per-bar features, all distances in ATR units:
 - `n_levels_near`: levels within `near_band_atr` of the close
 - `break_dir`, `break_mag_atr`, `break_vol_ratio`, `break_touches`, `break_tier`: set on
   bars where the close crossed a level since the previous close
+
+## Trendlines (strategy 2)
+
+```bash
+python -m src.features.trendlines
+```
+
+`build_trendline_features(df, piv)` draws a line through two confirmed pivots of the
+same kind: two lows make a support line, two highs a resistance line. A line is only
+drawn if the chord between its anchors is clean, meaning no bar low dips below a support
+chord (no bar high pokes above a resistance chord) within `touch_tol_atr`. Later pivots
+landing within that tolerance of the projected line add touches; a swing confirmed at a
+larger N upgrades the line's tier without adding a touch.
+
+A line dies the first time a close finishes beyond it. Chart-watchers erase a broken
+trendline, so unlike horizontal levels there is no role reversal; the break is recorded in
+the `tl_break_*` features on that bar. A line also dies quietly once it drifts more than
+`max_dist_atr` from price, since a steep line running away from price is off the screen
+and can never be closed through. Lines and their candidate anchors share the per-tier
+lookback used by horizontal levels.
+
+Per-bar features, prefixed `tl_`, with distances in ATR and slopes in ATR per bar:
+
+- `tl_sup_*` / `tl_res_*`: nearest support line below / resistance line above the close
+  with distance, slope, touches, tier (smaller of the two anchor tiers), distinct tiers,
+  bars since last touch and bars since the first anchor
+- `tl_sup_dist_atr_{N}` / `tl_res_dist_atr_{N}`: nearest line of tier at least N
+- `tl_n_sup`, `tl_n_res`, `tl_n_near`: alive lines on each side and within one ATR
+- `tl_break_dir`, `tl_break_mag_atr`, `tl_break_vol_ratio`, `tl_break_touches`,
+  `tl_break_tier`, `tl_break_slope_atr`: set on bars where a close finished through a line
 
 ## Tests
 

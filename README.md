@@ -83,7 +83,10 @@ embargo of at least the prediction horizon** between train and test folds.
 ├── src/
 │   ├── api/
 │   │   └── binance.py           # BTC hourly OHLCV fetch + SQLite cache
-│   └── ...
+│   └── features/
+│       └── pivots.py            # N-bar pivot detection, stamped at confirmation
+├── tests/
+│   └── test_pivots.py
 ├── requirements.txt
 └── README.md
 ```
@@ -108,3 +111,22 @@ python -m src.api.binance
 The first run fetches from Binance and writes to `data/technical_analysis.sqlite`, table
 `prices`. Later calls (or `load_prices()` from Python) read from the database and only
 hit the API to fill gaps or extend the series to the present.
+
+## Pivots
+
+```bash
+python -m src.features.pivots --check   # summary per tier, verified against brute force
+```
+
+`pivot_table(df)` returns one row per (swing, N) with both the occurrence bar and the
+confirmation bar (`confirm_idx = idx + N`). `known_pivots(piv, t)` gives the swings a
+chart-watcher could see at the close of bar `t`, with each swing's tier as it was known
+*then*; because the tiers confirm at different times, a swing's tier upgrades over time.
+`pivot_events(df, piv)` is the wide, time-aligned view stamped at confirmation, which is
+the form the feature builders consume.
+
+## Tests
+
+```bash
+python -m pytest tests/
+```

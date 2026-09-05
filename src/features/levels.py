@@ -10,7 +10,7 @@ obviousness (touch count, tier, cross-tier confluence, age) alongside distance.
 How levels are built
 --------------------
 Bars are processed in order. When a pivot becomes *confirmed* at bar ``t`` (see
-:mod:`src.features.pivots`) its price is compared with the existing levels. If one
+`src.features.pivots`) its price is compared with the existing levels. If one
 lies within ``merge_tol_atr`` ATRs it joins that level as an extra touch and the
 level's price becomes the mean of its members; otherwise a new level is created.
 A swing that is later confirmed at a larger ``N`` upgrades the level's tier rather
@@ -268,8 +268,8 @@ def build_level_features(
     """
     Build per-bar horizontal-level features from a pivot table.
 
-    ``df`` is the OHLCV frame from :func:`src.api.binance.load_prices`; ``pivots``
-    the long table from :func:`src.features.pivots.pivot_table`. ``lookback`` maps
+    ``df`` is the OHLCV frame from `src.api.binance.load_prices`; ``pivots``
+    the long table from `src.features.pivots.pivot_table`. ``lookback`` maps
     each tier ``N`` to how many bars a swing of that tier stays on the chart; pass
     ``None`` to keep every level forever. Returns ``(features, levels)``: the
     features aligned to ``df.index`` (NaN where no level exists on that side) and a

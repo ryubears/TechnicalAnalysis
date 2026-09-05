@@ -5,7 +5,7 @@ This is the second of the three strategies under test. A trendline is the straig
 line through two pivots of the same kind: two pivot lows make a support line, two
 pivot highs a resistance line. The slope is free, so unlike horizontal levels the
 line's price changes every bar; everything else (touches, tier, breaks, expiry)
-follows the same rules as :mod:`src.features.levels`.
+follows the same rules as `src.features.levels`.
 
 How lines are built
 -------------------
@@ -219,7 +219,7 @@ class _LineBook:
         Alive earlier pivots of ``kind`` whose chord to ``(i2, p2)`` is not already
         ruled out by an intermediate pivot of the same kind.
 
-        This is an exact pre-filter for :meth:`_chord_clean`: a pivot low below a
+        This is an exact pre-filter for `_chord_clean`: a pivot low below a
         support chord is itself a bar low below it, so every rejection here is
         correct, and survivors still get the full bar-by-bar check.
         """
@@ -345,8 +345,8 @@ def build_trendline_features(
     """
     Build per-bar trendline features from a pivot table.
 
-    ``df`` is the OHLCV frame from :func:`src.api.binance.load_prices`; ``pivots``
-    the long table from :func:`src.features.pivots.pivot_table`. ``max_dist_atr``
+    ``df`` is the OHLCV frame from `src.api.binance.load_prices`; ``pivots``
+    the long table from `src.features.pivots.pivot_table`. ``max_dist_atr``
     is how far a line may drift from the close before it is dropped as off-screen.
     Returns ``(features, lines)``: features aligned to ``df.index`` (NaN where no
     line exists on that side) and a table of the lines still alive at the end.

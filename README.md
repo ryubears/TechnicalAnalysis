@@ -84,9 +84,12 @@ embargo of at least the prediction horizon** between train and test folds.
 │   ├── api/
 │   │   └── binance.py           # BTC hourly OHLCV fetch + SQLite cache
 │   └── features/
-│       └── pivots.py            # N-bar pivot detection, stamped at confirmation
+│       ├── indicators.py        # ATR and other causal helpers
+│       ├── pivots.py            # N-bar pivot detection, stamped at confirmation
+│       └── levels.py            # strategy 1: horizontal S/R levels and their features
 ├── tests/
-│   └── test_pivots.py
+│   ├── test_pivots.py
+│   └── test_levels.py
 ├── requirements.txt
 └── README.md
 ```
@@ -124,6 +127,35 @@ chart-watcher could see at the close of bar `t`, with each swing's tier as it wa
 *then*; because the tiers confirm at different times, a swing's tier upgrades over time.
 `pivot_events(df, piv)` is the wide, time-aligned view stamped at confirmation, which is
 the form the feature builders consume.
+
+## Horizontal levels (strategy 1)
+
+```bash
+python -m src.features.levels
+```
+
+`build_level_features(df, piv)` replays the bars in order. When a pivot is confirmed its
+price either joins an existing level within `merge_tol_atr` ATRs (one more touch) or
+opens a new one; a later confirmation of the same swing at a larger N upgrades the
+level's tier without adding a touch. Support versus resistance is decided per bar by
+which side of the close the level sits on, and every close through a level is counted
+as a break rather than deleting it.
+
+Levels expire because a chart only shows a window: each swing stays visible for
+`lookback[N]` bars after it occurred, with N its largest confirmed tier. The defaults
+are one month for minor, six months for intermediate and two years for major swings.
+Without this, nine years of swings blanket the price range and every bar sits within
+half an ATR of some level.
+
+Per-bar features, all distances in ATR units:
+
+- `res_*` / `sup_*`: nearest level above / below the close with its distance, touch
+  count, tier, number of distinct tiers (cross-timeframe confluence), age and break count
+- `res_dist_atr_{N}` / `sup_dist_atr_{N}`: nearest level of tier at least N, for an
+  obviousness-controlled comparison
+- `n_levels_near`: levels within `near_band_atr` of the close
+- `break_dir`, `break_mag_atr`, `break_vol_ratio`, `break_touches`, `break_tier`: set on
+  bars where the close crossed a level since the previous close
 
 ## Tests
 

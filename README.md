@@ -125,12 +125,30 @@ hit the API to fill gaps or extend the series to the present.
 python -m src.features.pivots --check   # summary per tier, verified against brute force
 ```
 
-`pivot_table(df)` returns one row per (swing, N) with both the occurrence bar and the
-confirmation bar (`confirm_idx = idx + N`). `known_pivots(piv, t)` gives the swings a
-chart-watcher could see at the close of bar `t`, with each swing's tier as it was known
-*then*; because the tiers confirm at different times, a swing's tier upgrades over time.
-`pivot_events(df, piv)` is the wide, time-aligned view stamped at confirmation, which is
-the form the feature builders consume.
+`pivot_table(df, method=...)` returns one row per (swing, scale) with both the occurrence
+bar and the confirmation bar. Three detectors share that table:
+
+| method   | scale parameter `n`            | tiers (minor / intermediate / major) | confirmed at |
+|----------|--------------------------------|--------------------------------------|--------------|
+| `nbar`   | N bars each side               | 5 / 20 / 50                          | `idx + N` |
+| `zigzag` | reversal threshold, in ATRs    | 2 / 4 / 8                            | first bar that retraces `n` ATRs from the extreme |
+| `kernel` | Gaussian bandwidth, in bars    | 3 / 8 / 20                           | `t + 1 + 3n`, where `t` is the smoothed extremum |
+
+`zigzag` is the classic ATR-scaled ZigZag: it self-adjusts, so quiet regimes yield pivots
+from small swings and volatile regimes only from large ones, and its pivots strictly
+alternate high / low. `kernel` is Nadaraya-Watson smoothing after Lo, Mamaysky & Wang
+(2000) made causal: the smoothed close at `t` needs bars up to `t + 3n`, so a smoothed
+extremum is only stamped once that bar has closed, and the pivot is the real high (low)
+within one bandwidth of it.
+
+`known_pivots(piv, t)` gives the swings a chart-watcher could see at the close of bar `t`,
+with each swing's tier as it was known *then*; because the tiers confirm at different
+times, a swing's tier upgrades over time. `pivot_events(df, piv)` is the wide,
+time-aligned view stamped at confirmation, which is the form the feature builders consume.
+
+```bash
+python -m src.features.pivots --method zigzag
+```
 
 ## Horizontal levels (strategy 1)
 
@@ -147,9 +165,16 @@ as a break rather than deleting it.
 
 Levels expire because a chart only shows a window: each swing stays visible for
 `lookback[N]` bars after it occurred, with N its largest confirmed tier. The defaults
-are one month for minor, six months for intermediate and two years for major swings.
-Without this, nine years of swings blanket the price range and every bar sits within
-half an ATR of some level.
+are one month for minor, six months for intermediate and two years for major swings,
+assigned by rank so they apply to any pivot method. Without this, nine years of swings
+blanket the price range and every bar sits within half an ATR of some level.
+
+Only strong levels are reported. A single confirmed pivot is a point, not a level, so the
+book keeps every cluster but the features and the level table only report clusters with
+at least `min_touches` members (default 2). Weak clusters stay invisible until they earn
+a second touch. Trendlines take the same knob with a default of 3: every line has two
+anchors, and the classic rule is that a third touch confirms it, so only confirmed lines
+are reported while two-anchor lines are tracked until they earn that touch.
 
 Per-bar features, all distances in ATR units:
 

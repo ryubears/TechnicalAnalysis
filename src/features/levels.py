@@ -28,6 +28,15 @@ confirmed tier, so a minor swing drops off after a month while a major one linge
 for two years. A level with no visible members is removed. Without this, nine years
 of swings blanket the price range and every bar sits within half an ATR of a level.
 
+Strong levels only
+------------------
+A single confirmed pivot is a point, not a level; a chart-watcher draws the line once
+price has respected it twice. The book therefore keeps every cluster so it can grow,
+but the features and the level table only *report* clusters with at least
+``min_touches`` members (default 2) and, if set, a tier of at least ``min_tier``.
+Weak clusters are invisible to the nearest / confluence / break features until they
+earn a second touch.
+
 Per-bar features
 ----------------
 All distances are in ATR units and positive.
@@ -66,6 +75,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from src.features.indicators import atr as _atr, rolling_mean
 from src.features.pivots import DEFAULT_NS
+from typing import Sequence
 import argparse
 import heapq
 import logging
@@ -74,8 +84,35 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-# How many bars a swing of each tier stays "on the chart" after it occurred.
-DEFAULT_LOOKBACK: dict[int, int] = {5: 24 * 30, 20: 24 * 180, 50: 24 * 730}
+# How many bars a swing of each tier stays "on the chart" after it occurred, by rank
+# (minor, intermediate, major). Keyed by whatever scale parameters the pivot method uses.
+LOOKBACK_BY_RANK: tuple[int, ...] = (24 * 30, 24 * 180, 24 * 730)
+
+def default_lookback(ns: Sequence[int]) -> dict[int, int]:
+    """
+    Rank-based lookback for the tiers in ``ns``: smallest scale gets a month, the
+    next six months, the largest two years (extra tiers reuse the last value).
+    """
+    ordered = sorted(set(int(n) for n in ns))
+    return {n: LOOKBACK_BY_RANK[min(i, len(LOOKBACK_BY_RANK) - 1)] for i, n in enumerate(ordered)}
+
+def resolve_lookback(ns: Sequence[int], lookback: dict[int, int] | str | None) -> dict[int, int] | None:
+    """
+    ``"auto"`` -> `default_lookback(ns)`; ``None`` -> never expire; a dict is checked
+    to cover every tier in ``ns``.
+    """
+    if lookback is None:
+        return None
+    if isinstance(lookback, str):
+        if lookback != "auto":
+            raise ValueError("lookback must be a dict, None or 'auto'")
+        return default_lookback(ns)
+    missing = set(ns) - set(lookback)
+    if missing:
+        raise ValueError(f"lookback has no entry for tiers {sorted(missing)}")
+    return dict(lookback)
+
+DEFAULT_LOOKBACK: dict[int, int] = default_lookback(DEFAULT_NS)
 
 @dataclass
 class Level:
@@ -114,10 +151,20 @@ class _LevelBook:
     is a single searchsorted call.
     """
 
-    def __init__(self, tier_thresholds: tuple[int, ...], lookback: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        tier_thresholds: tuple[int, ...],
+        lookback: dict[int, int] | None = None,
+        min_touches: int = 1,
+        min_tier: int | None = None,
+    ) -> None:
         self.levels: dict[int, Level] = {}
         self.tier_thresholds = tier_thresholds
         self.lookback = lookback
+        self.min_touches = min_touches
+        self.min_tier = min_tier
+        self._all_prices = np.empty(0)
+        self._all_ids = np.empty(0, dtype=int)
         self._owner: dict[tuple[int, str], int] = {}        # (idx, kind) -> level id
         self._member_price: dict[tuple[int, str], float] = {}
         self._expiry: list[tuple[int, tuple[int, str], int]] = []  # (bar, key, n), lazily validated
@@ -126,6 +173,12 @@ class _LevelBook:
         self._prices = np.empty(0)
         self._ids = np.empty(0, dtype=int)
         self._by_tier: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def reports(self, lvl: Level) -> bool:
+        """
+        Is this level strong enough to show up in the features?
+        """
+        return lvl.touches >= self.min_touches and (self.min_tier is None or lvl.tier >= self.min_tier)
 
     def add_pivot(self, idx: int, kind: str, n: int, price: float, confirm_idx: int, tol: float) -> Level:
         key = (idx, kind)
@@ -141,12 +194,12 @@ class _LevelBook:
             return lvl
         # Otherwise merge into the closest level within tolerance, or open a new one.
         self._ensure_sorted()
-        if self._prices.size:
-            pos = np.searchsorted(self._prices, price)
-            cands = [p for p in (pos - 1, pos) if 0 <= p < self._prices.size]
-            best = min(cands, key=lambda p: abs(self._prices[p] - price))
-            if abs(self._prices[best] - price) <= tol:
-                lvl = self.levels[int(self._ids[best])]
+        if self._all_prices.size:
+            pos = np.searchsorted(self._all_prices, price)
+            cands = [p for p in (pos - 1, pos) if 0 <= p < self._all_prices.size]
+            best = min(cands, key=lambda p: abs(self._all_prices[p] - price))
+            if abs(self._all_prices[best] - price) <= tol:
+                lvl = self.levels[int(self._all_ids[best])]
                 lvl.members[key] = n
                 self._member_price[key] = price
                 self._owner[key] = lvl.id
@@ -199,20 +252,17 @@ class _LevelBook:
     def _ensure_sorted(self) -> None:
         if not self._dirty:
             return
-        if not self.levels:
-            self._prices = np.empty(0)
-            self._ids = np.empty(0, dtype=int)
-            self._by_tier = {n: (self._prices, self._ids) for n in self.tier_thresholds}
-        else:
-            ids = np.fromiter(self.levels.keys(), dtype=int, count=len(self.levels))
-            prices = np.fromiter((self.levels[i].price for i in ids), dtype="float64", count=ids.size)
-            order = np.argsort(prices, kind="stable")
-            self._prices, self._ids = prices[order], ids[order]
-            tiers = np.fromiter((self.levels[i].tier for i in self._ids), dtype=int, count=ids.size)
-            self._by_tier = {}
-            for n in self.tier_thresholds:
-                m = tiers >= n
-                self._by_tier[n] = (self._prices[m], self._ids[m])
+        ids = np.fromiter(self.levels.keys(), dtype=int, count=len(self.levels))
+        prices = np.fromiter((self.levels[i].price for i in ids), dtype="float64", count=ids.size)
+        order = np.argsort(prices, kind="stable")
+        self._all_prices, self._all_ids = prices[order], ids[order]
+        shown = np.fromiter((self.reports(self.levels[i]) for i in self._all_ids), dtype=bool, count=ids.size)
+        self._prices, self._ids = self._all_prices[shown], self._all_ids[shown]
+        tiers = np.fromiter((self.levels[i].tier for i in self._ids), dtype=int, count=self._ids.size)
+        self._by_tier = {}
+        for n in self.tier_thresholds:
+            m = tiers >= n
+            self._by_tier[n] = (self._prices[m], self._ids[m])
         self._dirty = False
 
     def nearest_above_below(self, price: float, min_tier: int | None = None) -> tuple[Level | None, Level | None]:
@@ -262,23 +312,29 @@ def build_level_features(
     merge_tol_atr: float = 0.5,
     near_band_atr: float = 1.0,
     vol_n: int = 20,
-    ns: tuple[int, ...] = DEFAULT_NS,
-    lookback: dict[int, int] | None = DEFAULT_LOOKBACK,
+    ns: Sequence[int] | None = None,
+    lookback: dict[int, int] | str | None = "auto",
+    min_touches: int = 2,
+    min_tier: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build per-bar horizontal-level features from a pivot table.
 
     ``df`` is the OHLCV frame from `src.api.binance.load_prices`; ``pivots``
-    the long table from `src.features.pivots.pivot_table`. ``lookback`` maps
-    each tier ``N`` to how many bars a swing of that tier stays on the chart; pass
-    ``None`` to keep every level forever. Returns ``(features, levels)``: the
-    features aligned to ``df.index`` (NaN where no level exists on that side) and a
-    table of every level still alive at the end of the series.
+    the long table from `src.features.pivots.pivot_table` (any method). ``ns``
+    are the tier parameters and default to those present in ``pivots``.
+    ``lookback`` maps each tier to how many bars a swing of that tier stays on the
+    chart: ``"auto"`` assigns a month / six months / two years by rank, ``None``
+    keeps every level forever. Only levels with at least ``min_touches`` members
+    (and tier at least ``min_tier``, if given) are reported in the features.
+    Returns ``(features, levels)``: the features aligned to ``df.index`` (NaN
+    where no reported level exists on that side) and a table of every level alive
+    at the end of the series, with a ``reported`` flag.
     """
-    if lookback is not None:
-        missing = set(ns) - set(lookback)
-        if missing:
-            raise ValueError(f"lookback has no entry for tiers {sorted(missing)}")
+    if ns is None:
+        ns = tuple(sorted(int(n) for n in pivots["n"].unique())) if len(pivots) else DEFAULT_NS
+    ns = tuple(ns)
+    lookback = resolve_lookback(ns, lookback)
     if not df.index.is_monotonic_increasing:
         raise ValueError("df must be sorted by time")
     L = len(df)
@@ -302,7 +358,7 @@ def build_level_features(
     out[:, ci["break_dir"]] = 0.0
     out[:, ci["n_levels_near"]] = 0.0
 
-    book = _LevelBook(tuple(ns), lookback)
+    book = _LevelBook(ns, lookback, min_touches, min_tier)
     ptr = 0
     for t in range(L):
         a = atr[t]
@@ -373,11 +429,13 @@ def level_table(book: _LevelBook, df: pd.DataFrame) -> pd.DataFrame:
                 "last_idx": lvl.last_idx,
                 "last_time": df.index[lvl.last_idx],
                 "breaks": lvl.breaks,
+                "reported": book.reports(lvl),
             }
         )
+    cols = ["id", "price", "touches", "tier", "n_tiers", "kinds", "first_idx", "first_time", "last_idx", "last_time", "breaks", "reported"]
     if not rows:
-        return pd.DataFrame(columns=["id", "price", "touches", "tier", "n_tiers", "kinds", "first_idx", "first_time", "last_idx", "last_time", "breaks"])
-    return pd.DataFrame(rows).sort_values(["touches", "tier"], ascending=False, kind="stable").reset_index(drop=True)
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)[cols].sort_values(["touches", "tier"], ascending=False, kind="stable").reset_index(drop=True)
 
 # --------------------------------------------------------------------------------------
 # CLI
@@ -385,7 +443,7 @@ def level_table(book: _LevelBook, df: pd.DataFrame) -> pd.DataFrame:
 
 def main(argv: list[str] | None = None) -> None:
     from src.api.binance import load_prices
-    from src.features.pivots import pivot_table
+    from src.features.pivots import DEFAULT_METHOD, METHODS, pivot_table
     import time
 
     p = argparse.ArgumentParser(description="Build horizontal-level features on the cached BTC series and summarise them.")
@@ -394,20 +452,22 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--near-band", type=float, default=1.0, help="confluence band in ATRs")
     p.add_argument("--top", type=int, default=10, help="print the most-touched levels")
     p.add_argument("--no-expiry", action="store_true", help="keep every level forever (no chart lookback)")
+    p.add_argument("--min-touches", type=int, default=2, help="report only levels with at least this many touches")
+    p.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD, help="pivot detector")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     df = load_prices(refresh=args.refresh)
-    piv = pivot_table(df)
+    piv = pivot_table(df, method=args.method)
     t0 = time.perf_counter()
     feats, levels = build_level_features(
         df, piv, merge_tol_atr=args.merge_tol, near_band_atr=args.near_band,
-        lookback=None if args.no_expiry else DEFAULT_LOOKBACK,
+        lookback=None if args.no_expiry else "auto", min_touches=args.min_touches,
     )
     log.info("built %d x %d features in %.1fs", *feats.shape, time.perf_counter() - t0)
 
     pd.set_option("display.width", 200)
-    print(f"\n{len(levels)} levels alive at the end, from {len(piv)} pivot rows\n")
+    print(f"\n[{args.method}] {len(levels)} levels alive at the end ({int(levels['reported'].sum())} reported), from {len(piv)} pivot rows\n")
     print("touches distribution:")
     print(levels["touches"].value_counts().sort_index().to_string())
     print("\nfeature summary:")

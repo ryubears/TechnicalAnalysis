@@ -17,3 +17,6 @@ data/*.sqlite-shm
 .DS_Store
 .vscode/
 .idea/
+
+# Model outputs (regenerable)
+data/results/

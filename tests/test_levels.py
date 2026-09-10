@@ -60,7 +60,7 @@ def test_columns_and_alignment():
 def test_features_nan_before_first_confirmation():
     df = _frame(_random_walk(3))
     piv = pivot_table(df, ns=(5,))
-    feats, _ = build_level_features(df, piv, ns=(5,))
+    feats, _ = build_level_features(df, piv, ns=(5,), min_touches=1)
     first = int(piv["confirm_idx"].min())
     assert feats["res_dist_atr"].iloc[:first].isna().all()
     assert feats["sup_dist_atr"].iloc[:first].isna().all()
@@ -95,7 +95,7 @@ def test_break_detected_when_close_crosses_level():
     close[200:] = 120.0  # decisive close through the level at bar 200
     df = _frame(close, spread=0.1)
     piv = pivot_table(df, ns=(5,))
-    feats, levels = build_level_features(df, piv, ns=(5,))
+    feats, levels = build_level_features(df, piv, ns=(5,), min_touches=1)
     assert feats["break_dir"].iloc[200] == 1
     assert feats["break_mag_atr"].iloc[200] > 0
     assert feats["break_touches"].iloc[200] >= 1
@@ -137,7 +137,7 @@ def test_minor_level_expires_after_lookback():
     df = _frame(close, spread=0.1)
     piv = pivot_table(df, ns=(5,))
     lookback = {5: 100}
-    feats, levels = build_level_features(df, piv, ns=(5,), lookback=lookback)
+    feats, levels = build_level_features(df, piv, ns=(5,), lookback=lookback, min_touches=1)
     confirm = int(piv[piv["idx"] == 50]["confirm_idx"].item())
     assert feats["res_touches"].iloc[confirm] == 1
     assert feats["res_touches"].iloc[50 + 100] == 1        # still on chart at the last visible bar
@@ -161,3 +161,36 @@ def test_default_lookback_covers_default_tiers():
     with pytest.raises(ValueError):
         df = _frame(_random_walk(8, size=300))
         build_level_features(df, pivot_table(df, ns=(5,)), ns=(5,), lookback={20: 10})
+
+def test_weak_levels_are_not_reported_by_default():
+    """
+    With the default min_touches=2, no feature ever points at a single-touch cluster,
+    but the level table still lists them, flagged as not reported.
+    """
+    df = _frame(_random_walk(9, size=4000))
+    piv = pivot_table(df)
+    feats, levels = build_level_features(df, piv)
+    for col in ("res_touches", "sup_touches", "break_touches"):
+        assert (feats[col].dropna() >= 2).all()
+    assert "reported" in levels.columns
+    assert (levels["reported"] == (levels["touches"] >= 2)).all()
+    assert (~levels["reported"]).any()                     # some single-touch clusters exist
+    loose, _ = build_level_features(df, piv, min_touches=1)
+    assert loose["res_dist_atr"].notna().sum() > feats["res_dist_atr"].notna().sum()
+
+def test_lookback_auto_matches_rank_defaults():
+    from src.features.levels import default_lookback, resolve_lookback
+    assert default_lookback((5, 20, 50)) == DEFAULT_LOOKBACK
+    assert default_lookback((2, 4, 8)) == {2: 24 * 30, 4: 24 * 180, 8: 24 * 730}
+    assert resolve_lookback((5,), "auto") == {5: 24 * 30}
+    assert resolve_lookback((5,), None) is None
+    with pytest.raises(ValueError):
+        resolve_lookback((5,), "bogus")
+
+def test_levels_accept_zigzag_and_kernel_pivots():
+    df = _frame(_random_walk(10, size=4000))
+    for method in ("zigzag", "kernel"):
+        piv = pivot_table(df, method=method)
+        feats, levels = build_level_features(df, piv)
+        assert list(feats.columns) == feature_columns(tuple(sorted(piv["n"].unique())))
+        assert feats.index.equals(df.index)

@@ -86,7 +86,7 @@ def test_break_retires_line_and_emits_features():
     close[300:] = 50.0                      # decisive close through the rising support line
     df = _frame(close, spread=0.1)
     piv = pivot_table(df, ns=(5,))
-    feats, lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=np.inf)
+    feats, lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=np.inf, min_touches=2)
     assert feats["tl_break_dir"].iloc[300] == -1
     assert feats["tl_break_mag_atr"].iloc[300] > 0
     assert feats["tl_break_touches"].iloc[300] == 2
@@ -130,9 +130,21 @@ def test_line_far_from_price_is_pruned_without_a_break():
     close = _zigzag_with_lows_on_line(lows_at, -0.5)   # steeply falling support line
     df = _frame(close, spread=0.5)
     piv = pivot_table(df, ns=(5,))
-    kept, kept_lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=np.inf)
-    pruned, pruned_lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=5.0)
+    kept, kept_lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=np.inf, min_touches=2)
+    pruned, pruned_lines = build_trendline_features(df, piv, ns=(5,), max_dist_atr=5.0, min_touches=2)
     assert kept["tl_n_sup"].iloc[-1] >= 1 and not kept_lines.empty     # never closed through, so it survives
     assert pruned["tl_n_sup"].iloc[-1] == 0 and pruned_lines.empty     # but it is off-screen, so it is dropped
     assert (pruned["tl_n_sup"] >= 1).sum() < (kept["tl_n_sup"] >= 1).sum()
     assert (pruned["tl_break_dir"] == 0).all()
+
+def test_min_touches_three_reports_only_confirmed_lines():
+    lows_at = (60, 160, 260)
+    df = _frame(_zigzag_with_lows_on_line(lows_at, 0.02), spread=0.1)
+    piv = pivot_table(df, ns=(5,))
+    feats, lines = build_trendline_features(df, piv, ns=(5,), touch_tol_atr=0.5, max_dist_atr=np.inf, min_touches=3)
+    assert (feats["tl_sup_touches"].dropna() >= 3).all()
+    assert (lines["reported"] == (lines["touches"] >= 3)).all()
+    # Before the third touch confirms there is no reported support line at all.
+    third = int(piv[piv["idx"] == 260]["confirm_idx"].item())
+    assert feats["tl_n_sup"].iloc[third - 1] == 0
+    assert feats["tl_n_sup"].iloc[third + 1] >= 1

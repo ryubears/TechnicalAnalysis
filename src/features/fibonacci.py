@@ -58,6 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from src.features.indicators import atr as _atr, rolling_mean
 from src.features.pivots import DEFAULT_NS
+from typing import Sequence
 import argparse
 import logging
 import numpy as np
@@ -156,20 +157,24 @@ def build_fibonacci_features(
     min_range_atr: float = 1.0,
     near_band_atr: float = 1.0,
     vol_n: int = 20,
-    ns: tuple[int, ...] = DEFAULT_NS,
+    ns: Sequence[int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build per-bar Fibonacci features from a pivot table.
 
     ``df`` is the OHLCV frame from `src.api.binance.load_prices`; ``pivots``
-    the long table from `src.features.pivots.pivot_table`. Swings smaller
-    than ``min_range_atr`` ATRs are ignored. Returns
+    the long table from `src.features.pivots.pivot_table` (any method); ``ns``
+    default to the tiers present in it. Swings smaller than ``min_range_atr``
+    ATRs are ignored. Returns
     ``(features, swings)``: features aligned to ``df.index`` (NaN for a tier until
     both a high and a low of that tier have confirmed) and the active swing per tier
     at the end of the series.
     """
     if not df.index.is_monotonic_increasing:
         raise ValueError("df must be sorted by time")
+    if ns is None:
+        ns = tuple(sorted(int(n) for n in pivots["n"].unique())) if len(pivots) else DEFAULT_NS
+    ns = tuple(ns)
     L = len(df)
     close = df["close"].to_numpy(dtype="float64")
     high = df["high"].to_numpy(dtype="float64")
@@ -277,28 +282,29 @@ def swing_table(book: _SwingBook, df: pd.DataFrame) -> pd.DataFrame:
 
 def main(argv: list[str] | None = None) -> None:
     from src.api.binance import load_prices
-    from src.features.pivots import pivot_table
+    from src.features.pivots import DEFAULT_METHOD, METHODS, default_ns, pivot_table
     import time
 
     p = argparse.ArgumentParser(description="Build Fibonacci features on the cached BTC series and summarise them.")
     p.add_argument("--refresh", action="store_true", help="update the price DB from Binance first")
     p.add_argument("--touch-tol", type=float, default=0.25, help="touch tolerance in ATRs")
     p.add_argument("--min-range", type=float, default=1.0, help="smallest swing to draw, in ATRs")
+    p.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD, help="pivot detector")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     df = load_prices(refresh=args.refresh)
-    piv = pivot_table(df)
+    piv = pivot_table(df, method=args.method)
     t0 = time.perf_counter()
     feats, swings = build_fibonacci_features(df, piv, touch_tol_atr=args.touch_tol, min_range_atr=args.min_range)
     log.info("built %d x %d features in %.1fs", *feats.shape, time.perf_counter() - t0)
 
     pd.set_option("display.width", 220)
-    print("\nactive swings at the end of the series:\n")
+    print(f"\n[{args.method}] active swings at the end of the series:\n")
     print(swings.to_string(index=False))
     print("\nfeature summary:")
     print(feats.describe().T[["count", "mean", "50%", "min", "max"]].to_string())
-    for n in DEFAULT_NS:
+    for n in default_ns(args.method):
         nb = int((feats[f"fib_{n}_break_dir"] != 0).sum())
         print(f"\ntier {n}: break bars {nb} of {len(feats)}; nearest-resistance ratio distribution:")
         print(feats[f"fib_{n}_res_ratio"].value_counts(normalize=True).sort_index().round(3).to_string())

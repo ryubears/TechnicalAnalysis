@@ -2,9 +2,15 @@
 Tests for src.features.pivots.
 """
 
+from src.features.indicators import atr
 from src.features.pivots import (
+    METHODS,
+    default_ns,
     detect_pivots,
     detect_pivots_bruteforce,
+    detect_pivots_kernel,
+    detect_pivots_zigzag,
+    kernel_smooth,
     known_pivots,
     pivot_events,
     pivot_table,
@@ -124,3 +130,97 @@ def test_empty_result_has_columns():
     piv = pivot_table(df, ns=(3,))
     assert piv.empty
     assert "confirm_idx" in piv.columns
+
+def _ohlc(close, spread=0.5):
+    close = np.asarray(close, dtype="float64")
+    idx = pd.date_range("2020-01-01", periods=close.size, freq="h", tz="UTC")
+    return pd.DataFrame({"open": close, "high": close + spread, "low": close - spread, "close": close}, index=idx)
+
+def _walk(seed, size=3000):
+    rng = np.random.default_rng(seed)
+    return 100 + np.cumsum(rng.normal(size=size))
+
+def test_unknown_method_rejected():
+    with pytest.raises(ValueError):
+        pivot_table(_ohlc(_walk(0, 300)), method="bogus")
+    assert set(METHODS) == {"nbar", "zigzag", "kernel"}
+    assert default_ns("nbar") == (5, 20, 50)
+
+def test_zigzag_alternates_and_confirms_on_reversal():
+    df = _ohlc(_walk(1))
+    h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
+    a = atr(h, l, c)
+    k = 2.0
+    recs = detect_pivots_zigzag(h, l, a, k)
+    assert len(recs) > 20
+    kinds = [r[1] for r in recs]
+    assert all(x != y for x, y in zip(kinds, kinds[1:]))           # strict alternation
+    idxs = [r[0] for r in recs]
+    assert all(x < y for x, y in zip(idxs, idxs[1:]))               # in time order
+    for i, kind, price, confirm, prom in recs:
+        assert confirm > i
+        if kind == "high":
+            assert price - l[confirm] >= k * a[confirm] - 1e-9 or prom >= k * a[confirm] - 1e-9
+            assert h[i] == price and h[i] == h[: confirm + 1][i]
+        else:
+            assert h[confirm] - price >= k * a[confirm] - 1e-9 or prom >= k * a[confirm] - 1e-9
+            assert l[i] == price
+
+def test_zigzag_larger_threshold_fewer_pivots():
+    df = _ohlc(_walk(2))
+    n = {k: len(pivot_table(df, ns=(k,), method="zigzag")) for k in (2, 4, 8)}
+    assert n[2] > n[4] > n[8] > 0
+
+def test_zigzag_prefix_invariance():
+    df = _ohlc(_walk(3))
+    T = 2000
+    full = pivot_table(df, method="zigzag")
+    part = pivot_table(df.iloc[:T], method="zigzag")
+    f = full[full["confirm_idx"] < T].reset_index(drop=True)
+    pd.testing.assert_frame_equal(f, part.reset_index(drop=True))
+
+def test_kernel_finds_sine_peaks_and_stamps_confirmation():
+    t = np.arange(1200)
+    close = 100 + 10 * np.sin(2 * np.pi * t / 100)     # peaks every 100 bars at t = 25, 125, ...
+    df = _ohlc(close, spread=0.0)
+    bw = 3
+    recs = detect_pivots_kernel(df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy(), bw)
+    highs = sorted(r[0] for r in recs if r[1] == "high")
+    lows = sorted(r[0] for r in recs if r[1] == "low")
+    H = int(np.ceil(3 * bw))
+    for i in highs:
+        assert min(abs(i - p) for p in range(25, 1200, 100)) <= 1
+    for i in lows:
+        assert min(abs(i - p) for p in range(75, 1200, 100)) <= 1
+    assert len(highs) >= 10 and len(lows) >= 10
+    for i, kind, price, confirm, prom in recs:
+        assert confirm > i and confirm - i <= 2 * H + 2
+        assert prom >= 0
+
+def test_kernel_smooth_shape_and_halfwidth():
+    m, H = kernel_smooth(np.ones(50), 2.0)
+    assert H == 6 and m.shape == (50,)
+    np.testing.assert_allclose(m[H:-H], 1.0)
+
+def test_kernel_larger_bandwidth_fewer_pivots():
+    df = _ohlc(_walk(4))
+    n = {bw: len(pivot_table(df, ns=(bw,), method="kernel")) for bw in (3, 8, 20)}
+    assert n[3] > n[8] > n[20] > 0
+
+def test_kernel_prefix_invariance():
+    df = _ohlc(_walk(5))
+    T = 2000
+    full = pivot_table(df, method="kernel")
+    part = pivot_table(df.iloc[:T], method="kernel")
+    f = full[full["confirm_idx"] < T].reset_index(drop=True)
+    pd.testing.assert_frame_equal(f, part.reset_index(drop=True))
+
+def test_all_methods_share_table_shape():
+    df = _ohlc(_walk(6))
+    for method in METHODS:
+        piv = pivot_table(df, method=method)
+        assert list(piv.columns) == ["idx", "time", "kind", "n", "tier", "price", "confirm_idx", "confirm_time", "prominence"]
+        assert (piv["confirm_idx"] > piv["idx"]).all()
+        assert piv["confirm_idx"].is_monotonic_increasing
+        assert set(piv["n"]) <= set(default_ns(method))
+        assert set(piv["tier"].astype(str)) <= {"minor", "intermediate", "major"}

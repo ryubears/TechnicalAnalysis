@@ -26,7 +26,10 @@ features on that bar and the line is gone. A line also dies quietly once it has
 drifted more than ``max_dist_atr`` ATRs from the close, since a steep line running
 away from price is no longer on anyone's screen and can never be closed through.
 Lines and their candidate anchor pivots also expire with the same per-tier lookback
-as horizontal levels.
+as horizontal levels. Only lines with at least ``min_touches`` members are reported
+in the features. Every line has two anchors, and the classic rule is that a third
+touch confirms a trendline, so the default of 3 reports only confirmed lines; the
+book still tracks two-anchor lines so they can earn that third touch.
 
 Per-bar features
 ----------------
@@ -51,8 +54,9 @@ All distances in ATR units; slopes in ATRs per bar.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from src.features.indicators import atr as _atr, rolling_mean
-from src.features.levels import DEFAULT_LOOKBACK
+from src.features.levels import DEFAULT_LOOKBACK, resolve_lookback
 from src.features.pivots import DEFAULT_NS
+from typing import Sequence
 import argparse
 import heapq
 import logging
@@ -112,7 +116,9 @@ class _LineBook:
         touch_tol_atr: float,
         break_tol_atr: float,
         max_dist_atr: float,
+        min_touches: int = 3,
     ) -> None:
+        self.min_touches = min_touches
         self.low, self.high, self.close = low, high, close
         self.lookback = lookback
         self.touch_tol_atr = touch_tol_atr
@@ -126,7 +132,7 @@ class _LineBook:
         self._line_expiry: list[tuple[int, int]] = []
         self._next_id = 0
         self._dirty = {"low": True, "high": True}
-        self._arrays: dict[str, tuple[np.ndarray, ...]] = {}
+        self._arrays: dict[tuple[str, bool], tuple[np.ndarray, ...]] = {}
         self.n_created = 0
         self.n_broken = 0
         self.n_pruned = 0
@@ -183,7 +189,7 @@ class _LineBook:
 
         # 1. Touches on existing lines of this kind.
         touched_keys: set[Key] = set()
-        ids, vals, _, _ = self.values(kind, idx)
+        ids, vals, _, _ = self.values(kind, idx, reported=False)
         for lid in ids[np.abs(vals - price) <= tol]:
             line = self.lines[int(lid)]
             line.members[key] = n
@@ -263,24 +269,31 @@ class _LineBook:
 
     # -- evaluation ---------------------------------------------------------------
 
-    def arrays(self, kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def reports(self, line: Line) -> bool:
+        return line.touches >= self.min_touches
+
+    def arrays(self, kind: str, reported: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        (ids, a_idx, price_a, slope, tier) for alive lines of ``kind``.
+        (ids, a_idx, price_a, slope, tier) for alive lines of ``kind``; with
+        ``reported`` only those strong enough for the features.
         """
         if self._dirty[kind]:
-            ls = [self.lines[i] for i in self._kind_ids[kind]]
-            self._arrays[kind] = (
-                np.fromiter((l.id for l in ls), dtype=int, count=len(ls)),
-                np.fromiter((l.a_key[0] for l in ls), dtype=int, count=len(ls)),
-                np.fromiter((l.price_a for l in ls), dtype="float64", count=len(ls)),
-                np.fromiter((l.slope for l in ls), dtype="float64", count=len(ls)),
-                np.fromiter((l.tier for l in ls), dtype=int, count=len(ls)),
-            )
+            for flag in (True, False):
+                ls = [self.lines[i] for i in self._kind_ids[kind]]
+                if flag:
+                    ls = [l for l in ls if self.reports(l)]
+                self._arrays[(kind, flag)] = (
+                    np.fromiter((l.id for l in ls), dtype=int, count=len(ls)),
+                    np.fromiter((l.a_key[0] for l in ls), dtype=int, count=len(ls)),
+                    np.fromiter((l.price_a for l in ls), dtype="float64", count=len(ls)),
+                    np.fromiter((l.slope for l in ls), dtype="float64", count=len(ls)),
+                    np.fromiter((l.tier for l in ls), dtype=int, count=len(ls)),
+                )
             self._dirty[kind] = False
-        return self._arrays[kind]
+        return self._arrays[(kind, reported)]
 
-    def values(self, kind: str, t: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        ids, a_idx, price_a, slope, tier = self.arrays(kind)
+    def values(self, kind: str, t: int, reported: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ids, a_idx, price_a, slope, tier = self.arrays(kind, reported)
         return ids, price_a + slope * (t - a_idx), slope, tier
 
     def check_breaks(self, t: int, atr_t: float) -> list[tuple[Line, float]]:
@@ -291,7 +304,7 @@ class _LineBook:
         c = self.close[t]
         broken: list[tuple[Line, float]] = []
         for kind in ("low", "high"):
-            ids, vals, _, _ = self.values(kind, t)
+            ids, vals, _, _ = self.values(kind, t, reported=False)
             if ids.size == 0:
                 continue
             hit = c < vals - btol if kind == "low" else c > vals + btol
@@ -300,7 +313,7 @@ class _LineBook:
         for line, _ in broken:
             self._remove(line)
             self.n_broken += 1
-        return broken
+        return [(line, v) for line, v in broken if self.reports(line)]
 
     def prune_far(self, t: int, atr_t: float) -> None:
         """
@@ -309,7 +322,7 @@ class _LineBook:
         limit = self.max_dist_atr * atr_t
         c = self.close[t]
         for kind in ("low", "high"):
-            ids, vals, _, _ = self.values(kind, t)
+            ids, vals, _, _ = self.values(kind, t, reported=False)
             if ids.size == 0:
                 continue
             for lid in ids[np.abs(vals - c) > limit]:
@@ -339,24 +352,28 @@ def build_trendline_features(
     max_dist_atr: float = 30.0,
     near_band_atr: float = 1.0,
     vol_n: int = 20,
-    ns: tuple[int, ...] = DEFAULT_NS,
-    lookback: dict[int, int] | None = DEFAULT_LOOKBACK,
+    ns: Sequence[int] | None = None,
+    lookback: dict[int, int] | str | None = "auto",
+    min_touches: int = 3,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build per-bar trendline features from a pivot table.
 
     ``df`` is the OHLCV frame from `src.api.binance.load_prices`; ``pivots``
-    the long table from `src.features.pivots.pivot_table`. ``max_dist_atr``
-    is how far a line may drift from the close before it is dropped as off-screen.
-    Returns ``(features, lines)``: features aligned to ``df.index`` (NaN where no
-    line exists on that side) and a table of the lines still alive at the end.
+    the long table from `src.features.pivots.pivot_table` (any method); ``ns``
+    default to the tiers present in it and ``lookback`` follows the same rules as
+    in `src.features.levels`. ``max_dist_atr`` is how far a line may drift from the
+    close before it is dropped as off-screen; ``min_touches`` is the weakest line
+    the features report. Returns ``(features, lines)``: features aligned to
+    ``df.index`` (NaN where no reported line exists on that side) and a table of
+    the lines still alive at the end, with a ``reported`` flag.
     """
     if not df.index.is_monotonic_increasing:
         raise ValueError("df must be sorted by time")
-    if lookback is not None:
-        missing = set(ns) - set(lookback)
-        if missing:
-            raise ValueError(f"lookback has no entry for tiers {sorted(missing)}")
+    if ns is None:
+        ns = tuple(sorted(int(n) for n in pivots["n"].unique())) if len(pivots) else DEFAULT_NS
+    ns = tuple(ns)
+    lookback = resolve_lookback(ns, lookback)
     L = len(df)
     close = df["close"].to_numpy(dtype="float64")
     high = df["high"].to_numpy(dtype="float64")
@@ -378,7 +395,7 @@ def build_trendline_features(
     for c in ("tl_n_sup", "tl_n_res", "tl_n_near", "tl_break_dir"):
         out[:, ci[c]] = 0.0
 
-    book = _LineBook(low, high, close, lookback, touch_tol_atr, break_tol_atr, max_dist_atr)
+    book = _LineBook(low, high, close, lookback, touch_tol_atr, break_tol_atr, max_dist_atr, min_touches)
     ptr = 0
     for t in range(L):
         a = atr[t]
@@ -433,7 +450,7 @@ def line_table(book: _LineBook, df: pd.DataFrame, atr: np.ndarray) -> pd.DataFra
     Every line alive at the end of the series, most-touched first.
     """
     cols = ["id", "kind", "a_idx", "a_time", "b_idx", "b_time", "price_a", "slope", "slope_atr",
-            "touches", "tier", "n_tiers", "created_idx", "last_touch_idx", "value_now"]
+            "touches", "tier", "n_tiers", "created_idx", "last_touch_idx", "value_now", "reported"]
     L = len(df) - 1
     rows = []
     for l in book.lines.values():
@@ -446,6 +463,7 @@ def line_table(book: _LineBook, df: pd.DataFrame, atr: np.ndarray) -> pd.DataFra
                 "touches": l.touches, "tier": l.tier, "n_tiers": l.n_tiers,
                 "created_idx": l.created_idx, "last_touch_idx": l.last_touch_idx,
                 "value_now": l.value(L),
+                "reported": book.reports(l),
             }
         )
     if not rows:
@@ -458,7 +476,7 @@ def line_table(book: _LineBook, df: pd.DataFrame, atr: np.ndarray) -> pd.DataFra
 
 def main(argv: list[str] | None = None) -> None:
     from src.api.binance import load_prices
-    from src.features.pivots import pivot_table
+    from src.features.pivots import DEFAULT_METHOD, METHODS, pivot_table
     import time
 
     p = argparse.ArgumentParser(description="Build trendline features on the cached BTC series and summarise them.")
@@ -468,20 +486,22 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-dist", type=float, default=30.0, help="drop lines further than this many ATRs from price")
     p.add_argument("--top", type=int, default=10, help="print the most-touched alive lines")
     p.add_argument("--no-expiry", action="store_true", help="keep anchors and lines forever")
+    p.add_argument("--min-touches", type=int, default=3, help="report only lines with at least this many touches")
+    p.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD, help="pivot detector")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     df = load_prices(refresh=args.refresh)
-    piv = pivot_table(df)
+    piv = pivot_table(df, method=args.method)
     t0 = time.perf_counter()
     feats, lines = build_trendline_features(
         df, piv, touch_tol_atr=args.touch_tol, break_tol_atr=args.break_tol, max_dist_atr=args.max_dist,
-        lookback=None if args.no_expiry else DEFAULT_LOOKBACK,
+        lookback=None if args.no_expiry else "auto", min_touches=args.min_touches,
     )
     log.info("built %d x %d features in %.1fs", *feats.shape, time.perf_counter() - t0)
 
     pd.set_option("display.width", 220)
-    print(f"\n{len(lines)} lines alive at the end\n")
+    print(f"\n[{args.method}] {len(lines)} lines alive at the end ({int(lines['reported'].sum()) if len(lines) else 0} reported)\n")
     print("alive-line touches distribution:")
     print(lines["touches"].value_counts().sort_index().to_string())
     print("\nfeature summary:")

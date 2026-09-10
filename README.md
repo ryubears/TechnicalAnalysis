@@ -89,6 +89,11 @@ embargo of at least the prediction horizon** between train and test folds.
 │       ├── levels.py            # strategy 1: horizontal S/R levels and their features
 │       ├── trendlines.py        # strategy 2: trendlines through same-kind pivots
 │       └── fibonacci.py         # strategy 3: Fibonacci ratios on the active swing per tier
+│   └── model/
+│       ├── features.py          # feature matrix: three strategies + causal context
+│       ├── events.py            # approach events and bounce / break labels
+│       ├── walkforward.py       # purged walk-forward splits with embargo
+│       └── harness.py           # LightGBM runs, obviousness ablation, report
 ├── tests/
 │   ├── test_pivots.py
 │   ├── test_levels.py
@@ -245,6 +250,46 @@ Per-bar features for each tier, prefixed `fib_{N}_`:
   close crossed a ratio level since the previous close
 
 Across tiers, `fib_n_near` counts ratio levels within one ATR of the close.
+
+## Modeling harness
+
+```bash
+python -m src.model.harness --strategy levels --method zigzag --horizon 24
+```
+
+The harness answers the thesis question directly: does reaction at a level scale with
+how obvious the level is?
+
+**Events.** The unit of analysis is an approach: the first bar at which the close comes
+within `near_atr` (0.5) ATRs of the nearest level above or below. Each approach is
+labelled by a race over the next `horizon` (24) bars: a **bounce** if the close first
+moves `react_atr` (1.0) ATRs away from the level, a **break** if it first moves
+`break_atr` (1.0) ATRs toward and through it, undecided otherwise. Both distances are
+measured from the event bar's close, so the barriers are symmetric and a random walk
+bounces half the time; any excess is reaction. (`--barrier level` measures them from
+the level's price instead, which reads more literally off a chart but biases the base
+rate toward "bounce" because the bounce barrier is then the nearer one.) Undecided
+events are dropped and their share reported. The same event builder serves horizontal
+levels, trendlines and Fibonacci ratios by renaming each strategy's side-specific
+columns to generic ones.
+
+**Purged walk-forward.** Test blocks of `test_days` (180) run forward in time from
+`min_train_days` (365). Training uses only events whose whole label horizon ends before
+the block starts minus an embargo, so the purge is structural and the embargo (default
+= horizon, never smaller) adds a gap against serial correlation. Early stopping uses an
+embargoed tail of the training set, never the test block.
+
+**The test.** Per fold, two LightGBM classifiers: one on geometry and context features
+only (distance to the level, distance to the level on the other side, slope, recent
+returns, volatility ...), and one that also sees the *obviousness* features (touches,
+tier, cross-tier confluence, age, breaks, nearby-level count). The out-of-sample log-loss
+gain from adding obviousness is the ablation. Alongside it, a direct table of
+out-of-sample bounce rate by touches bin, by tier and by confluence, with Wilson intervals
+and a Cochran-Armitage trend test. A flat table and a zero ablation gain mean the levels
+are noise, whatever the aggregate accuracy looks like.
+
+Outputs (fold metrics, obviousness table, feature importance, labelled events with
+out-of-sample predictions, summary JSON) are written to `data/results/`.
 
 ## Tests
 
